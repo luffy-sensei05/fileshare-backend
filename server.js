@@ -16,12 +16,10 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 // Middleware
 // Configure CORS to allow requests from the frontend
 app.use(cors({
-  origin: [FRONTEND_URL, 'https://fileshare-app-eight.vercel.app', 'https://fileshare-backend-pa0n.onrender.com', 'http://localhost:5173', '*'], // Allow all origins in development
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-  exposedHeaders: ['Content-Disposition'],
-  credentials: true,
-  maxAge: 86400 // Cache preflight requests for 24 hours
+  origin: [FRONTEND_URL, 'https://fileshare-app-eight.vercel.app', 'https://fileshare-backend-pa0n.onrender.com', 'http://localhost:5173'], // Your domains
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 app.use(express.json());
 
