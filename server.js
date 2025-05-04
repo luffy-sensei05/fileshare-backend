@@ -15,7 +15,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 // Middleware
 // Configure CORS to allow requests from the frontend
 app.use(cors({
-  origin: [FRONTEND_URL, 'https://file-share-app.vercel.app'], // Add your Vercel domain here
+  origin: [FRONTEND_URL, 'https://fileshare-app-eight.vercel.app', 'https://fileshare-backend-pa0n.onrender.com'], // Your domains
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -35,6 +35,12 @@ app.use(express.static(publicDir));
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Create chunks directory for chunked uploads
+const chunksDir = path.join(__dirname, 'chunks');
+if (!fs.existsSync(chunksDir)) {
+  fs.mkdirSync(chunksDir, { recursive: true });
 }
 
 // Create database file if it doesn't exist
@@ -73,7 +79,156 @@ const saveDb = (data) => {
   fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
 };
 
+// Store upload metadata for chunked uploads
+const chunkedUploads = {};
+
 // Routes
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Server is running' });
+});
+
+// Initialize a chunked upload
+app.post('/api/upload/init', express.json(), (req, res) => {
+  try {
+    const { uploadId, filename, totalChunks, fileSize, mimeType } = req.body;
+
+    // Create directory for this upload's chunks
+    const uploadChunksDir = path.join(chunksDir, uploadId);
+    if (!fs.existsSync(uploadChunksDir)) {
+      fs.mkdirSync(uploadChunksDir, { recursive: true });
+    }
+
+    // Store metadata
+    chunkedUploads[uploadId] = {
+      filename,
+      totalChunks: parseInt(totalChunks),
+      receivedChunks: 0,
+      fileSize: parseInt(fileSize),
+      mimeType,
+      uploadChunksDir,
+      createdAt: Date.now()
+    };
+
+    res.json({ success: true, message: 'Upload initialized' });
+  } catch (error) {
+    console.error('Upload initialization error:', error);
+    res.status(500).json({ error: 'Failed to initialize upload' });
+  }
+});
+
+// Handle chunk upload
+const chunkUpload = multer({
+  dest: path.join(chunksDir, 'temp'),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB per chunk
+}).single('chunk');
+
+app.post('/api/upload/chunk', (req, res) => {
+  chunkUpload(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    try {
+      const { uploadId, chunkIndex } = req.body;
+
+      if (!chunkedUploads[uploadId]) {
+        // Clean up the temporary file
+        if (req.file && req.file.path) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(400).json({ error: 'Invalid upload ID' });
+      }
+
+      // Move chunk from temp to the upload's chunks directory
+      const chunkPath = path.join(chunkedUploads[uploadId].uploadChunksDir, chunkIndex);
+      fs.renameSync(req.file.path, chunkPath);
+
+      // Update received chunks count
+      chunkedUploads[uploadId].receivedChunks++;
+
+      res.json({
+        success: true,
+        receivedChunks: chunkedUploads[uploadId].receivedChunks,
+        totalChunks: chunkedUploads[uploadId].totalChunks
+      });
+    } catch (error) {
+      console.error('Chunk upload error:', error);
+      res.status(500).json({ error: 'Failed to process chunk' });
+    }
+  });
+});
+
+// Complete chunked upload
+app.post('/api/upload/complete', express.json(), async (req, res) => {
+  try {
+    const { uploadId } = req.body;
+    const uploadInfo = chunkedUploads[uploadId];
+
+    if (!uploadInfo) {
+      return res.status(400).json({ error: 'Invalid upload ID' });
+    }
+
+    // Check if all chunks were received
+    if (uploadInfo.receivedChunks !== uploadInfo.totalChunks) {
+      return res.status(400).json({
+        error: 'Not all chunks received',
+        received: uploadInfo.receivedChunks,
+        expected: uploadInfo.totalChunks
+      });
+    }
+
+    // Generate a unique code
+    const code = crypto.randomBytes(3).toString('hex');
+
+    // Create a unique filename
+    const storedFilename = `chunked-${Date.now()}-${code}${path.extname(uploadInfo.filename)}`;
+    const filePath = path.join(uploadsDir, storedFilename);
+
+    // Create write stream for the final file
+    const writeStream = fs.createWriteStream(filePath);
+
+    // Combine all chunks
+    for (let i = 0; i < uploadInfo.totalChunks; i++) {
+      const chunkPath = path.join(uploadInfo.uploadChunksDir, i.toString());
+      const chunkBuffer = fs.readFileSync(chunkPath);
+      writeStream.write(chunkBuffer);
+    }
+
+    writeStream.end();
+
+    // Wait for the file to be written
+    await new Promise(resolve => writeStream.on('finish', resolve));
+
+    // Save file info to database
+    const db = getDb();
+    db.files.push({
+      id: code,
+      filename: uploadInfo.filename,
+      storedFilename,
+      mimetype: uploadInfo.mimeType,
+      size: uploadInfo.fileSize,
+      uploadDate: new Date().toISOString()
+    });
+    saveDb(db);
+
+    // Clean up chunks
+    fs.rmSync(uploadInfo.uploadChunksDir, { recursive: true, force: true });
+    delete chunkedUploads[uploadId];
+
+    res.json({
+      success: true,
+      code,
+      filename: uploadInfo.filename,
+      size: uploadInfo.fileSize
+    });
+  } catch (error) {
+    console.error('Upload completion error:', error);
+    res.status(500).json({ error: 'Failed to complete upload' });
+  }
+});
+
+// Regular single file upload (keeping for backward compatibility)
 app.post('/api/upload', upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
@@ -181,6 +336,26 @@ app.use((req, res, next) => {
   // Serve index.html for all other routes
   res.sendFile(path.join(publicDir, 'index.html'));
 });
+
+// Cleanup job for abandoned chunked uploads (runs every hour)
+setInterval(() => {
+  const now = Date.now();
+  const uploadIds = Object.keys(chunkedUploads);
+
+  for (const uploadId of uploadIds) {
+    const uploadInfo = chunkedUploads[uploadId];
+    // Remove uploads older than 24 hours
+    if (now - uploadInfo.createdAt > 24 * 60 * 60 * 1000) {
+      try {
+        fs.rmSync(uploadInfo.uploadChunksDir, { recursive: true, force: true });
+        delete chunkedUploads[uploadId];
+        console.log(`Cleaned up abandoned upload: ${uploadId}`);
+      } catch (error) {
+        console.error(`Failed to clean up upload ${uploadId}:`, error);
+      }
+    }
+  }
+}, 60 * 60 * 1000); // Run every hour
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
