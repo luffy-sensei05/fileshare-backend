@@ -47,7 +47,10 @@ if (!fs.existsSync(chunksDir)) {
 // Create database file if it doesn't exist
 const dbPath = path.join(__dirname, 'db.json');
 if (!fs.existsSync(dbPath)) {
-  fs.writeFileSync(dbPath, JSON.stringify({ files: [] }));
+  fs.writeFileSync(dbPath, JSON.stringify({
+    files: [],
+    groups: [] // Add groups array to store file groups
+  }));
 }
 
 // Configure multer storage with optimized settings
@@ -98,8 +101,23 @@ const upload = multer({
 
 // Helper function to read/write to our simple JSON database
 const getDb = () => {
-  const data = fs.readFileSync(dbPath, 'utf8');
-  return JSON.parse(data);
+  try {
+    const data = fs.readFileSync(dbPath, 'utf8');
+    const db = JSON.parse(data);
+
+    // Ensure groups array exists (for backward compatibility)
+    if (!db.groups) {
+      db.groups = [];
+    }
+
+    return db;
+  } catch (error) {
+    console.error('Error reading database:', error);
+    return {
+      files: [],
+      groups: []
+    };
+  }
 };
 
 const saveDb = (data) => {
@@ -654,6 +672,107 @@ app.get('/api/download/:code', (req, res) => {
   }
 });
 
+// Create a group for multiple files
+app.post('/api/group', express.json(), (req, res) => {
+  try {
+    const { fileIds, groupName } = req.body;
+
+    if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+      return res.status(400).json({ error: 'No file IDs provided' });
+    }
+
+    // Generate a unique code for the group
+    const groupCode = crypto.randomBytes(3).toString('hex');
+
+    // Get the database
+    const db = getDb();
+
+    // Verify all files exist
+    const files = [];
+    for (const fileId of fileIds) {
+      const fileInfo = db.files.find(file => file.id === fileId);
+      if (!fileInfo) {
+        return res.status(404).json({ error: `File with ID ${fileId} not found` });
+      }
+      files.push(fileInfo);
+    }
+
+    // Create the group
+    const group = {
+      id: groupCode,
+      name: groupName || `File Group (${files.length} files)`,
+      fileIds: fileIds,
+      createdAt: new Date().toISOString(),
+      fileCount: files.length
+    };
+
+    // Add the group to the database
+    db.groups.push(group);
+    saveDb(db);
+
+    // Return the group info
+    res.status(201).json({
+      success: true,
+      groupCode,
+      name: group.name,
+      fileCount: files.length,
+      files: files.map(file => ({
+        id: file.id,
+        filename: file.filename,
+        size: file.size,
+        compressed: !!file.compressed
+      }))
+    });
+  } catch (error) {
+    console.error('Group creation error:', error);
+    res.status(500).json({ error: 'Failed to create file group' });
+  }
+});
+
+// Get group info
+app.get('/api/group/:code', (req, res) => {
+  try {
+    const { code } = req.params;
+
+    // Get the database
+    const db = getDb();
+
+    // Find the group
+    const group = db.groups.find(group => group.id === code);
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    // Get all files in the group
+    const files = [];
+    for (const fileId of group.fileIds) {
+      const fileInfo = db.files.find(file => file.id === fileId);
+      if (fileInfo) {
+        files.push({
+          id: fileInfo.id,
+          filename: fileInfo.filename,
+          size: fileInfo.size,
+          compressed: !!fileInfo.compressed,
+          uploadDate: fileInfo.uploadDate
+        });
+      }
+    }
+
+    // Return the group info
+    res.json({
+      success: true,
+      groupCode: group.id,
+      name: group.name,
+      fileCount: files.length,
+      createdAt: group.createdAt,
+      files
+    });
+  } catch (error) {
+    console.error('Group info error:', error);
+    res.status(500).json({ error: 'Failed to get group information' });
+  }
+});
+
 app.get('/api/file/:code', (req, res) => {
   try {
     const { code } = req.params;
@@ -663,6 +782,17 @@ app.get('/api/file/:code', (req, res) => {
     const fileInfo = db.files.find(file => file.id === code);
 
     if (!fileInfo) {
+      // Check if this is a group code instead
+      const group = db.groups.find(group => group.id === code);
+      if (group) {
+        return res.status(400).json({
+          error: 'This is a file group code, not a single file code',
+          isGroup: true,
+          groupCode: code,
+          fileCount: group.fileCount
+        });
+      }
+
       return res.status(404).json({ error: 'File not found' });
     }
 
