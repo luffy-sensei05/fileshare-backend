@@ -16,7 +16,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 // Middleware
 // Configure CORS to allow requests from the frontend
 app.use(cors({
-  origin: [FRONTEND_URL, 'https://fileshare-app-eight.vercel.app', 'https://fileshare-backend-pa0n.onrender.com'], // Your domains
+  origin: [FRONTEND_URL, 'https://fileshare-app-eight.vercel.app', 'https://fileshare-backend-pa0n.onrender.com', 'http://localhost:5173'], // Your domains
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -456,12 +456,16 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
 // Regular single file upload with optional compression
 app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, res) => {
   try {
+    // Add request ID for tracking in logs
+    const requestId = Date.now().toString() + '-' + Math.random().toString(36).substring(2, 8);
+
     if (!req.file) {
+      console.error(`[${requestId}] Upload error: No file received in request`);
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Log the upload request
-    console.log(`Processing upload request for file: ${req.file.originalname}, size: ${req.file.size} bytes`);
+    // Log the upload request with request ID
+    console.log(`[${requestId}] Processing upload request for file: ${req.file.originalname}, size: ${req.file.size} bytes, type: ${req.file.mimetype}`);
 
     // Add a unique identifier to the filename to prevent duplicates in the results
     // This doesn't change the original filename shown to users
@@ -568,8 +572,11 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
     // Create a unique internal ID for this file
     const internalId = `${timestamp}-${uniqueId}`;
 
-    // Log the file details
-    console.log(`File upload successful: ${originalFilename}, size: ${finalSize} bytes, code: ${code}`);
+    // Log the file details with request ID
+    console.log(`[${requestId}] File upload successful: ${originalFilename}, size: ${finalSize} bytes, code: ${code}, compressed: ${compress}`);
+
+    // Add a small delay before responding to ensure file system operations are complete
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     // Save file info to our database
     const db = getDb();
@@ -599,8 +606,16 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
       uploadTime: timestamp // Include the timestamp to help identify this specific upload
     });
   } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ error: 'File upload failed' });
+    const requestId = req.requestId || 'unknown';
+    console.error(`[${requestId}] Upload error:`, error);
+
+    // Provide more detailed error message
+    let errorMessage = 'File upload failed';
+    if (error.message) {
+      errorMessage = `Upload failed: ${error.message}`;
+    }
+
+    res.status(500).json({ error: errorMessage });
   }
 });
 
