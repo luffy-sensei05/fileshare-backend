@@ -646,6 +646,18 @@ app.get('/api/download/:code', (req, res) => {
     const fileInfo = db.files.find(file => file.id === code);
 
     if (!fileInfo) {
+      // Check if this is a group code instead
+      const group = db.groups.find(group => group.id === code);
+      if (group) {
+        // Return an error indicating this is a group code
+        return res.status(400).json({
+          error: 'This is a file group code, not a single file code',
+          isGroup: true,
+          groupCode: code,
+          fileCount: group.fileCount
+        });
+      }
+
       return res.status(404).json({ error: 'File not found' });
     }
 
