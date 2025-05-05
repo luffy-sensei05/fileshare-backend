@@ -700,11 +700,18 @@ app.get('/api/download/:code', (req, res) => {
 app.post('/api/group', express.json(), (req, res) => {
   try {
     const { fileIds, groupName } = req.body;
+    const requestId = Date.now().toString() + '-' + Math.random().toString(36).substring(2, 8);
 
-    console.log('Creating group with fileIds:', fileIds, 'groupName:', groupName);
+    console.log(`[${requestId}] Creating group with fileIds:`, fileIds, 'groupName:', groupName);
 
     if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+      console.error(`[${requestId}] No file IDs provided in request`);
       return res.status(400).json({ error: 'No file IDs provided' });
+    }
+
+    if (fileIds.length < 2) {
+      console.error(`[${requestId}] Not enough files to create a group (${fileIds.length})`);
+      return res.status(400).json({ error: 'At least 2 files are required to create a group' });
     }
 
     // Generate a unique code for the group
@@ -715,16 +722,28 @@ app.post('/api/group', express.json(), (req, res) => {
 
     // Verify all files exist
     const files = [];
+    const missingFiles = [];
+
     for (const fileId of fileIds) {
       const fileInfo = db.files.find(file => file.id === fileId);
       if (!fileInfo) {
-        console.error(`File with ID ${fileId} not found in database`);
-        return res.status(404).json({ error: `File with ID ${fileId} not found` });
+        console.error(`[${requestId}] File with ID ${fileId} not found in database`);
+        missingFiles.push(fileId);
+      } else {
+        files.push(fileInfo);
       }
-      files.push(fileInfo);
     }
 
-    console.log(`Found ${files.length} files for group creation`);
+    // If any files are missing, return an error
+    if (missingFiles.length > 0) {
+      console.error(`[${requestId}] ${missingFiles.length} files not found: ${missingFiles.join(', ')}`);
+      return res.status(404).json({
+        error: `Some files were not found on the server`,
+        missingFiles
+      });
+    }
+
+    console.log(`[${requestId}] Found ${files.length} files for group creation`);
 
     // Create the group
     const group = {
@@ -738,9 +757,16 @@ app.post('/api/group', express.json(), (req, res) => {
     // Add the group to the database
     db.groups = db.groups || []; // Ensure groups array exists
     db.groups.push(group);
-    saveDb(db);
 
-    console.log(`Created group with ID ${groupCode}, containing ${files.length} files`);
+    // Save the database with error handling
+    try {
+      saveDb(db);
+    } catch (saveError) {
+      console.error(`[${requestId}] Error saving database:`, saveError);
+      return res.status(500).json({ error: 'Failed to save group to database' });
+    }
+
+    console.log(`[${requestId}] Created group with ID ${groupCode}, containing ${files.length} files`);
 
     // Return the group info
     res.status(201).json({
@@ -765,6 +791,15 @@ app.post('/api/group', express.json(), (req, res) => {
 app.get('/api/group/:code', (req, res) => {
   try {
     const { code } = req.params;
+    const requestId = Date.now().toString() + '-' + Math.random().toString(36).substring(2, 8);
+
+    console.log(`[${requestId}] Getting info for group code: ${code}`);
+
+    // Validate the code
+    if (!code || typeof code !== 'string' || code.length !== 6) {
+      console.error(`[${requestId}] Invalid group code format: ${code}`);
+      return res.status(400).json({ error: 'Invalid group code format' });
+    }
 
     // Get the database
     const db = getDb();
@@ -772,31 +807,45 @@ app.get('/api/group/:code', (req, res) => {
     // Find the group
     const group = db.groups.find(group => group.id === code);
     if (!group) {
+      console.error(`[${requestId}] Group not found for code: ${code}`);
       return res.status(404).json({ error: 'Group not found' });
     }
 
     // Get all files in the group
     const files = [];
+    const missingFiles = [];
+
     for (const fileId of group.fileIds) {
       const fileInfo = db.files.find(file => file.id === fileId);
       if (fileInfo) {
-        files.push({
-          id: fileInfo.id,
-          filename: fileInfo.filename,
-          size: fileInfo.size,
-          compressed: !!fileInfo.compressed,
-          uploadDate: fileInfo.uploadDate
-        });
+        // Check if the file exists on disk
+        const filePath = path.join(uploadsDir, fileInfo.storedFilename);
+        if (fs.existsSync(filePath)) {
+          files.push({
+            id: fileInfo.id,
+            filename: fileInfo.filename,
+            size: fileInfo.size,
+            compressed: !!fileInfo.compressed,
+            uploadDate: fileInfo.uploadDate
+          });
+        } else {
+          console.warn(`[${requestId}] File exists in database but not on disk: ${fileId} (${fileInfo.filename})`);
+          missingFiles.push(fileId);
+        }
+      } else {
+        console.warn(`[${requestId}] File not found in database: ${fileId}`);
+        missingFiles.push(fileId);
       }
     }
 
     // Log the group info for debugging
-    console.log(`Group info for code ${code}:`, {
+    console.log(`[${requestId}] Group info for code ${code}:`, {
       id: group.id,
       name: group.name,
       fileCount: files.length,
       fileIds: group.fileIds,
-      filesFound: files.length
+      filesFound: files.length,
+      missingFiles: missingFiles.length
     });
 
     // Return the group info
@@ -806,7 +855,8 @@ app.get('/api/group/:code', (req, res) => {
       name: group.name,
       fileCount: files.length,
       createdAt: group.createdAt,
-      files
+      files,
+      missingFiles: missingFiles.length > 0 ? missingFiles : undefined
     });
   } catch (error) {
     console.error('Group info error:', error);
