@@ -826,6 +826,7 @@ app.get('/api/file/:code', (req, res) => {
       // Check if this is a group code instead
       const group = db.groups.find(group => group.id === code);
       if (group) {
+        // Redirect to the group info endpoint
         return res.status(400).json({
           error: 'This is a file group code, not a single file code',
           isGroup: true,
