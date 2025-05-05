@@ -51,6 +51,18 @@ if (!fs.existsSync(dbPath)) {
     files: [],
     groups: [] // Add groups array to store file groups
   }));
+} else {
+  // Ensure the database has the groups array
+  try {
+    const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    if (!db.groups) {
+      db.groups = [];
+      fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+      console.log('Added groups array to existing database');
+    }
+  } catch (error) {
+    console.error('Error checking database structure:', error);
+  }
 }
 
 // Configure multer storage with optimized settings
@@ -689,6 +701,8 @@ app.post('/api/group', express.json(), (req, res) => {
   try {
     const { fileIds, groupName } = req.body;
 
+    console.log('Creating group with fileIds:', fileIds, 'groupName:', groupName);
+
     if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
       return res.status(400).json({ error: 'No file IDs provided' });
     }
@@ -704,10 +718,13 @@ app.post('/api/group', express.json(), (req, res) => {
     for (const fileId of fileIds) {
       const fileInfo = db.files.find(file => file.id === fileId);
       if (!fileInfo) {
+        console.error(`File with ID ${fileId} not found in database`);
         return res.status(404).json({ error: `File with ID ${fileId} not found` });
       }
       files.push(fileInfo);
     }
+
+    console.log(`Found ${files.length} files for group creation`);
 
     // Create the group
     const group = {
@@ -719,8 +736,11 @@ app.post('/api/group', express.json(), (req, res) => {
     };
 
     // Add the group to the database
+    db.groups = db.groups || []; // Ensure groups array exists
     db.groups.push(group);
     saveDb(db);
+
+    console.log(`Created group with ID ${groupCode}, containing ${files.length} files`);
 
     // Return the group info
     res.status(201).json({
@@ -769,6 +789,15 @@ app.get('/api/group/:code', (req, res) => {
         });
       }
     }
+
+    // Log the group info for debugging
+    console.log(`Group info for code ${code}:`, {
+      id: group.id,
+      name: group.name,
+      fileCount: files.length,
+      fileIds: group.fileIds,
+      filesFound: files.length
+    });
 
     // Return the group info
     res.json({
