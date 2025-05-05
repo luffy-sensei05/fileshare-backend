@@ -451,7 +451,8 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
       compressed: !!compress,
       compressionRatio: compressionRatio,
       uploadDate: new Date().toISOString(),
-      chunked: true
+      chunked: true,
+      uniqueIdentifier: internalId // Add an explicit unique identifier field
     });
     saveDb(db);
 
@@ -475,7 +476,8 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
       originalSize: compress ? uploadInfo.fileSize : null,
       compressed: !!compress,
       compressionRatio: compressionRatio,
-      uploadTime: timestamp // Include the timestamp to help identify this specific upload
+      uploadTime: timestamp, // Include the timestamp to help identify this specific upload
+      uniqueIdentifier: internalId // Include the unique identifier for better tracking
     });
   } catch (error) {
     console.error('Upload completion error:', error);
@@ -504,6 +506,10 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
 
     // Store the original filename
     const originalFilename = req.file.originalname;
+
+    // Add a unique internal ID to the file metadata
+    // This helps track files uniquely even if they have the same name
+    const internalFileId = `${timestamp}-${uniqueId}`;
 
     // Check if compression was requested
     let compress = req.body.optimized === 'true';
@@ -600,7 +606,7 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
     const code = crypto.randomBytes(3).toString('hex');
 
     // Create a unique internal ID for this file
-    const internalId = `${timestamp}-${uniqueId}`;
+    const internalId = internalFileId; // Use the previously defined internalFileId
 
     // Log the file details with request ID
     console.log(`[${requestId}] File upload successful: ${originalFilename}, size: ${finalSize} bytes, code: ${code}, compressed: ${compress}`);
@@ -621,7 +627,8 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
       originalSize: compress ? req.file.size : null,
       compressed: !!compress,
       compressionRatio: compressionRatio,
-      uploadDate: new Date().toISOString()
+      uploadDate: new Date().toISOString(),
+      uniqueIdentifier: internalId // Add an explicit unique identifier field
     });
     saveDb(db);
 
@@ -633,7 +640,8 @@ app.post('/api/upload', upload.single('file'), multerErrorHandler, async (req, r
       originalSize: compress ? req.file.size : null,
       compressed: !!compress,
       compressionRatio: compressionRatio,
-      uploadTime: timestamp // Include the timestamp to help identify this specific upload
+      uploadTime: timestamp, // Include the timestamp to help identify this specific upload
+      uniqueIdentifier: internalId // Include the unique identifier for better tracking
     });
   } catch (error) {
     const requestId = req.requestId || 'unknown';
@@ -723,14 +731,22 @@ app.post('/api/group', express.json(), (req, res) => {
     // Verify all files exist
     const files = [];
     const missingFiles = [];
+    const processedIds = new Set(); // Track processed IDs to avoid duplicates
 
     for (const fileId of fileIds) {
+      // Skip if we've already processed this ID
+      if (processedIds.has(fileId)) {
+        console.log(`[${requestId}] Skipping duplicate file ID: ${fileId}`);
+        continue;
+      }
+
       const fileInfo = db.files.find(file => file.id === fileId);
       if (!fileInfo) {
         console.error(`[${requestId}] File with ID ${fileId} not found in database`);
         missingFiles.push(fileId);
       } else {
         files.push(fileInfo);
+        processedIds.add(fileId); // Mark this ID as processed
       }
     }
 
@@ -743,13 +759,26 @@ app.post('/api/group', express.json(), (req, res) => {
       });
     }
 
-    console.log(`[${requestId}] Found ${files.length} files for group creation`);
+    // If we have no files after deduplication, return an error
+    if (files.length === 0) {
+      console.error(`[${requestId}] No valid files found after deduplication`);
+      return res.status(400).json({ error: 'No valid files provided' });
+    }
 
-    // Create the group
+    // If we have only one file after deduplication, return an error
+    if (files.length < 2) {
+      console.error(`[${requestId}] Not enough unique files to create a group (${files.length})`);
+      return res.status(400).json({ error: 'At least 2 unique files are required to create a group' });
+    }
+
+    console.log(`[${requestId}] Found ${files.length} unique files for group creation`);
+
+    // Create the group with deduplicated file IDs
+    const uniqueFileIds = Array.from(processedIds);
     const group = {
       id: groupCode,
       name: groupName || `File Group (${files.length} files)`,
-      fileIds: fileIds,
+      fileIds: uniqueFileIds,
       createdAt: new Date().toISOString(),
       fileCount: files.length
     };
@@ -766,20 +795,29 @@ app.post('/api/group', express.json(), (req, res) => {
       return res.status(500).json({ error: 'Failed to save group to database' });
     }
 
-    console.log(`[${requestId}] Created group with ID ${groupCode}, containing ${files.length} files`);
+    console.log(`[${requestId}] Created group with ID ${groupCode}, containing ${files.length} unique files`);
 
-    // Return the group info
+    // Return the group info with enhanced file information
     res.status(201).json({
       success: true,
       groupCode,
       name: group.name,
       fileCount: files.length,
-      files: files.map(file => ({
-        id: file.id,
-        filename: file.filename,
-        size: file.size,
-        compressed: !!file.compressed
-      }))
+      files: files.map((file, index) => {
+        // Check if there are duplicate filenames in the group
+        const duplicateCount = files.filter(f => f.filename === file.filename).length;
+        const displayFilename = duplicateCount > 1
+          ? `${file.filename} (${index + 1})` // Add index to duplicate filenames
+          : file.filename;
+
+        return {
+          id: file.id,
+          filename: file.filename,
+          displayFilename: displayFilename, // Add a display name for UI
+          size: file.size,
+          compressed: !!file.compressed
+        };
+      })
     });
   } catch (error) {
     console.error('Group creation error:', error);
@@ -814,13 +852,18 @@ app.get('/api/group/:code', (req, res) => {
     // Get all files in the group
     const files = [];
     const missingFiles = [];
+    const filenameCount = {}; // Track filename occurrences
 
+    // First pass: collect all files and count filename occurrences
     for (const fileId of group.fileIds) {
       const fileInfo = db.files.find(file => file.id === fileId);
       if (fileInfo) {
         // Check if the file exists on disk
         const filePath = path.join(uploadsDir, fileInfo.storedFilename);
         if (fs.existsSync(filePath)) {
+          // Count filename occurrences
+          filenameCount[fileInfo.filename] = (filenameCount[fileInfo.filename] || 0) + 1;
+
           files.push({
             id: fileInfo.id,
             filename: fileInfo.filename,
@@ -838,24 +881,47 @@ app.get('/api/group/:code', (req, res) => {
       }
     }
 
+    // Second pass: add display names for duplicate filenames
+    const filenameCounts = {}; // Track how many times we've seen each filename
+    const filesWithDisplayNames = files.map(file => {
+      // Initialize counter for this filename if not exists
+      if (!filenameCounts[file.filename]) {
+        filenameCounts[file.filename] = 0;
+      }
+
+      // Increment counter
+      filenameCounts[file.filename]++;
+
+      // If this filename appears multiple times, add a number suffix
+      const isDuplicate = filenameCount[file.filename] > 1;
+      const displayFilename = isDuplicate
+        ? `${file.filename} (${filenameCounts[file.filename]})`
+        : file.filename;
+
+      return {
+        ...file,
+        displayFilename
+      };
+    });
+
     // Log the group info for debugging
     console.log(`[${requestId}] Group info for code ${code}:`, {
       id: group.id,
       name: group.name,
-      fileCount: files.length,
+      fileCount: filesWithDisplayNames.length,
       fileIds: group.fileIds,
-      filesFound: files.length,
+      filesFound: filesWithDisplayNames.length,
       missingFiles: missingFiles.length
     });
 
-    // Return the group info
+    // Return the group info with display names
     res.json({
       success: true,
       groupCode: group.id,
       name: group.name,
-      fileCount: files.length,
+      fileCount: filesWithDisplayNames.length,
       createdAt: group.createdAt,
-      files,
+      files: filesWithDisplayNames,
       missingFiles: missingFiles.length > 0 ? missingFiles : undefined
     });
   } catch (error) {
